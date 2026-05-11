@@ -12,6 +12,12 @@ import {EMPTY_STATE, UpdateState} from '../../../node/updater/types';
 const sh = (cmd: string, opts: any = {}) =>
   execSync(cmd, {stdio: 'pipe', ...opts}).toString().trim();
 
+// On Windows, git's child processes can briefly hold file handles after exit
+// (NTFS lazy-release / antivirus / pack files), so an immediate rmdir on the
+// temp repo hits EBUSY. fs.rm's built-in retry clears the flake.
+const cleanupTmp = (dir: string) =>
+  fs.rm(dir, {recursive: true, force: true, maxRetries: 10, retryDelay: 100});
+
 const buildTmpRepo = async (): Promise<{dir: string; v1Sha: string; v2Sha: string}> => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'updater-it-'));
   sh('git init -b main', {cwd: dir});
@@ -94,7 +100,7 @@ describe(__filename, function () {
       // The fromSha recorded in state matches the v0.0.1 SHA.
       assert.equal((states.at(-1)!.execution as {fromSha: string}).fromSha, v1Sha);
     } finally {
-      await fs.rm(dir, {recursive: true, force: true});
+      await cleanupTmp(dir);
     }
   });
 
@@ -140,7 +146,7 @@ describe(__filename, function () {
       const lock = await fs.readFile(path.join(dir, 'pnpm-lock.yaml'), 'utf8');
       assert.match(lock, /lockfileVersion: x/);
     } finally {
-      await fs.rm(dir, {recursive: true, force: true});
+      await cleanupTmp(dir);
     }
   });
 
@@ -182,7 +188,7 @@ describe(__filename, function () {
       assert.equal(states.at(-1)!.execution.status, 'rolled-back');
       assert.equal(sh('git rev-parse HEAD', {cwd: dir}), v1Sha);
     } finally {
-      await fs.rm(dir, {recursive: true, force: true});
+      await cleanupTmp(dir);
     }
   });
 
@@ -219,13 +225,22 @@ describe(__filename, function () {
         rollbackHealthCheckSeconds: 60,
       });
       assert.equal(r.armed, false);
-      // Wait for the fire-and-forget rollback to finish.
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      // Poll for the fire-and-forget rollback to land in its terminal state.
+      // A flat sleep here was racy on Windows (git checkout + spawned-process
+      // bookkeeping can push past several hundred ms).
+      const deadline = Date.now() + 10_000;
+      while (
+        states.at(-1)?.execution.status !== 'rolled-back' &&
+        states.at(-1)?.execution.status !== 'rollback-failed' &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       assert.equal(states.at(-1)!.execution.status, 'rolled-back');
       assert.equal(sh('git rev-parse HEAD', {cwd: dir}), v1Sha);
       assert.equal(exitedWith, 75);
     } finally {
-      await fs.rm(dir, {recursive: true, force: true});
+      await cleanupTmp(dir);
     }
   });
 
@@ -259,7 +274,7 @@ describe(__filename, function () {
       assert.equal(states.at(-1)!.lastResult!.outcome, 'rollback-failed');
       assert.equal(exitedWith, 75);
     } finally {
-      await fs.rm(dir, {recursive: true, force: true});
+      await cleanupTmp(dir);
     }
   });
 });
