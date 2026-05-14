@@ -6,13 +6,14 @@ import {NavLink, Outlet, useNavigate} from "react-router-dom";
 import {useStore} from "./store/store.ts";
 import {LoadingScreen} from "./utils/LoadingScreen.tsx";
 import {Trans, useTranslation} from "react-i18next";
-import {Cable, Construction, Crown, NotepadText, Wrench, PhoneCall, LucideMenu, Bell} from "lucide-react";
+import {Cable, Construction, Crown, NotepadText, Wrench, PhoneCall, LucideMenu, Bell, Users} from "lucide-react";
 import {UpdateBanner} from "./components/UpdateBanner";
 
 const WS_URL = import.meta.env.DEV ? 'http://localhost:9001' : ''
 
 export const App = () => {
   const setSettings = useStore(state => state.setSettings);
+  const erasureEnabled = useStore(state => state.gdprAuthorErasureEnabled)
   const {t} = useTranslation()
   const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true)
@@ -48,7 +49,11 @@ export const App = () => {
       if (reason === 'io server disconnect') settingSocket.connect();
     });
 
-    settingSocket.on('settings', (settings) => {
+    settingSocket.on('settings', (settings: any) => {
+      if (settings && typeof settings.flags === 'object' && settings.flags) {
+        useStore.getState().setGdprAuthorErasureEnabled(
+            !!settings.flags.gdprAuthorErasure);
+      }
       if (settings.results === 'NOT_ALLOWED') {
         console.log('Not allowed to view settings.json')
         return;
@@ -124,6 +129,16 @@ export const App = () => {
               <span className="sidebar-nav-icon"><NotepadText size={18}/></span>
               {sidebarOpen && <span className="sidebar-nav-label"><Trans i18nKey="ep_admin_pads:ep_adminpads2_manage-pads"/></span>}
             </NavLink>
+            {erasureEnabled && (
+              <NavLink
+                to="/authors"
+                className={({isActive}) => `sidebar-nav-item${isActive ? ' is-active' : ''}`}
+                title={sidebarOpen ? undefined : t('ep_admin_authors:title', {ns: 'ep_admin_authors'})}
+              >
+                <span className="sidebar-nav-icon"><Users size={18}/></span>
+                {sidebarOpen && <span className="sidebar-nav-label"><Trans i18nKey="ep_admin_authors:title" ns="ep_admin_authors"/></span>}
+              </NavLink>
+            )}
             <NavLink
               to="/shout"
               className={({isActive}) => `sidebar-nav-item${isActive ? ' is-active' : ''}`}
