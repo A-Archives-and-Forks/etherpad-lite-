@@ -702,9 +702,18 @@ const pad = {
 
     const postAceInit = () => {
       padeditbar.init();
-      setTimeout(() => {
+      // Skip link (a11y, ether/etherpad#7255): href="#editorcontainer" gives
+      // a working no-JS fallback, but the real focus target is the inner
+      // contenteditable inside two nested iframes — route through ace_focus.
+      $('#skip-to-content').on('click', (e) => {
+        e.preventDefault();
         padeditor.ace.focus();
-      }, 0);
+      });
+      // Auto-focusing the editor on load traps Tab inside the editor iframe
+      // (Tab inserts an indent there, not bubbling out), which makes the
+      // skip link above unreachable via Tab from the URL bar — i.e., the
+      // standard WCAG 2.4.1 entry path. Users now click or Tab into the
+      // editor; the skip link is the first tabbable element.
       pad.refreshPadSettingsControls();
       pad.applyOptionsChange();
       pad.refreshMyViewControls();

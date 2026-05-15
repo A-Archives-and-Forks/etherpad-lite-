@@ -146,3 +146,35 @@ test('show-more toolbar button has aria-label and aria-expanded', async ({page})
   await expect(btn).toHaveAttribute('aria-label', 'Show more toolbar buttons');
   await expect(btn).toHaveAttribute('aria-expanded', 'false');
 });
+
+test('skip-to-content link bypasses toolbar (WCAG 2.4.1, #7255)', async ({page}) => {
+  const skip = page.locator('#skip-to-content');
+  // It exists in the DOM and is hidden from sighted users by default —
+  // sr-only-style positioning (top: -100px) keeps it offscreen.
+  await expect(skip).toHaveAttribute('href', '#editorcontainer');
+  // html10n should fill the visible text from the locale.
+  await expect(skip).toHaveText('Skip to editor');
+  // Activating moves focus into the editor iframe (ace_focus → targetBody).
+  await skip.focus();
+  await skip.press('Enter');
+  // Focus now sits on the inner ace iframe wrapper, not on the skip link.
+  const focusedId = await page.evaluate(() => document.activeElement?.id || '');
+  expect(focusedId).not.toBe('skip-to-content');
+});
+
+test('skip link is the first Tab target from a fresh page (WCAG 2.4.1, #7255)', async ({page}) => {
+  // Pre-condition: pad.ts no longer auto-focuses the editor on load
+  // (that previously trapped Tab inside the editor iframe and left the
+  // skip link unreachable from the URL bar). Initial focus is on <body>.
+  const initialTag = await page.evaluate(() => document.activeElement?.tagName);
+  expect(initialTag).toBe('BODY');
+  await page.keyboard.press('Tab');
+  const afterTabId = await page.evaluate(() => document.activeElement?.id || '');
+  expect(afterTabId).toBe('skip-to-content');
+});
+
+test('line-number sidediv is hidden from screen readers (#7255)', async ({page}) => {
+  // sidediv lives in the outer ace iframe (ace_outer) — query the frame.
+  const outerFrame = page.frameLocator('iframe[name="ace_outer"]');
+  await expect(outerFrame.locator('#sidediv')).toHaveAttribute('aria-hidden', 'true');
+});
