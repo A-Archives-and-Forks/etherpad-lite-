@@ -11,9 +11,11 @@ import * as Toast from '@radix-ui/react-toast'
 import {I18nextProvider} from "react-i18next";
 import i18n from "./localization/i18n.ts";
 import {PadPage} from "./pages/PadPage.tsx";
+import {AuthorPage} from "./pages/AuthorPage.tsx";
 import {ToastDialog} from "./utils/Toast.tsx";
 import {ShoutPage} from "./pages/ShoutPage.tsx";
 import {UpdatePage} from "./pages/UpdatePage.tsx";
+import {QueryProvider} from './api/QueryProvider.tsx';
 
 const router = createBrowserRouter(createRoutesFromElements(
     <><Route element={<App/>}>
@@ -22,6 +24,7 @@ const router = createBrowserRouter(createRoutesFromElements(
         <Route path="/settings" element={<SettingsPage/>}/>
         <Route path="/help" element={<HelpPage/>}/>
         <Route path="/pads" element={<PadPage/>}/>
+        <Route path="/authors" element={<AuthorPage/>}/>
         <Route path="/shout" element={<ShoutPage/>}/>
         <Route path="/update" element={<UpdatePage/>}/>
     </Route><Route path="/login">
@@ -34,11 +37,13 @@ const router = createBrowserRouter(createRoutesFromElements(
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-      <I18nextProvider i18n={i18n}>
-      <Toast.Provider>
-          <ToastDialog/>
-          <RouterProvider router={router}/>
-      </Toast.Provider>
-      </I18nextProvider>
+      <QueryProvider>
+          <I18nextProvider i18n={i18n}>
+          <Toast.Provider>
+              <ToastDialog/>
+              <RouterProvider router={router}/>
+          </Toast.Provider>
+          </I18nextProvider>
+      </QueryProvider>
   </React.StrictMode>,
 )

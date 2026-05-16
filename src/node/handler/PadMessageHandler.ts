@@ -24,7 +24,7 @@ import {MapArrayType} from "../types/MapType";
 import AttributeMap from '../../static/js/AttributeMap';
 const padManager = require('../db/PadManager');
 const padDeletionManager = require('../db/PadDeletionManager');
-import {checkRep, cloneAText, compose, deserializeOps, follow, identity, inverse, makeAText, makeSplice, moveOpsToNewPool, mutateAttributionLines, mutateTextLines, oldLen, prepareForWire, splitAttributionLines, splitTextLines, unpack} from '../../static/js/Changeset';
+import {applyToText, checkRep, cloneAText, compose, deserializeOps, follow, identity, inverse, makeAText, moveOpsToNewPool, mutateAttributionLines, mutateTextLines, oldLen, prepareForWire, splitAttributionLines, splitTextLines, unpack} from '../../static/js/Changeset';
 import ChatMessage from '../../static/js/ChatMessage';
 import AttributePool from '../../static/js/AttributePool';
 const AttributeManager = require('../../static/js/AttributeManager');
@@ -37,6 +37,7 @@ import settings, {
   sofficeAvailable
 } from '../utils/Settings';
 import {anonymizeIp} from '../utils/anonymizeIp';
+import {isAcceptingConnections} from '../updater/SessionDrainer';
 const logIp = (ip: string | null | undefined) => anonymizeIp(ip, settings.ipLogging);
 const securityManager = require('../db/SecurityManager');
 const plugins = require('../../static/js/pluginfw/plugin_defs');
@@ -46,6 +47,7 @@ const accessLogger = log4js.getLogger('access');
 const hooks = require('../../static/js/pluginfw/hooks');
 const stats = require('../stats')
 const assert = require('assert').strict;
+import {recordChangesetApply, recordSocketEmit} from '../prom-instruments';
 import {RateLimiterMemory} from 'rate-limiter-flexible';
 import {ChangesetRequest, PadUserInfo, SocketClientRequest} from "../types/SocketClientRequest";
 import {APool, AText, PadAuthor, PadType} from "../types/PadType";
@@ -84,9 +86,12 @@ exports.socketio = () => {
  *       - auth: Object with the following properties copied from the client's CLIENT_READY message:
  *           - padID: Pad ID requested by the user. Unlike the padId property described below, this
  *             may be a read-only pad ID.
- *           - sessionID: Copied from the client's sessionID cookie, which should be the value
- *             returned from the createSession() HTTP API. This will be null/undefined if
- *             createSession() isn't used or the portal doesn't set the sessionID cookie.
+ *           - sessionID: The value returned from the createSession() HTTP API, normally set as
+ *             the `sessionID` cookie by the integrator. Read from the socket.io handshake's
+ *             Cookie header (so the cookie can be HttpOnly — issue #7045) and falls back to a
+ *             deprecated `sessionID` field on the CLIENT_READY message for legacy clients.
+ *             This will be null/undefined if createSession() isn't used or the integrator
+ *             doesn't set the sessionID cookie.
  *           - token: User-supplied token.
  *       - author: The user's author ID.
  *       - padId: The real (not read-only) ID of the pad.
@@ -112,6 +117,20 @@ function getActivePadCountFromSessionInfos() {
   return padIds.size;
 }
 exports.getActivePadCountFromSessionInfos = getActivePadCountFromSessionInfos;
+
+// Per-pad user counts derived on demand from sessioninfos. Used by
+// prometheus.ts to populate `etherpad_pad_users{padId}` so the #7756
+// scaling-dive harness can confirm the pad it's pointing at actually
+// has the expected concurrency.
+function getPadUsersMap(): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const {padId} of Object.values(sessioninfos)) {
+    if (!padId) continue;
+    out.set(padId, (out.get(padId) ?? 0) + 1);
+  }
+  return out;
+}
+exports.getPadUsersMap = getPadUsersMap;
 
 /**
  * Build a sanitized copy of the plugins registry suitable for sending to the
@@ -377,18 +396,48 @@ exports.handleMessage = async (socket:any, message: ClientVarMessage) => {
   if (!thisSession) throw new Error('message from an unknown connection');
 
   if (message.type === 'CLIENT_READY') {
+    // Refuse new joiners while the updater drainer is running. Existing sockets
+    // are unaffected — only the initial CLIENT_READY handshake is gated. The
+    // pad UI will show the drain announcement separately via shoutMessage.
+    // Use socket.emit('message', ...) for consistency with the other disconnect
+    // paths in this file (see line ~221, 569). socket.json.send is a socket.io
+    // v2/v3-era API that may not exist on v4 Socket objects.
+    if (!isAcceptingConnections()) {
+      socket.emit('message', {disconnect: 'updateInProgress'});
+      socket.disconnect(true);
+      return;
+    }
     // Prefer the HttpOnly author-token cookie over the in-message token (GDPR
     // PR3). Legacy clients (pre-PR3 browsers or API consumers) still send
     // `token` in the CLIENT_READY payload — honour it one more release, warn
     // once so the migration is visible in logs. The socket.io handshake does
     // not run cookie-parser, so pull the cookie directly from the Cookie
     // header.
+    //
+    // The same applies to the integrator-set `sessionID` cookie (issue #7045):
+    // historically the client read it from `document.cookie`, which forced the
+    // cookie to be non-HttpOnly and exposed it to XSS. Now we read it from the
+    // handshake Cookie header so integrators can set it `HttpOnly`.
     const cookiePrefix = settings.cookie?.prefix || '';
     const cookieHeader: string = socket.request?.headers?.cookie || '';
-    const cookieName = `${cookiePrefix}token`;
-    const cookieMatch = cookieHeader.split(/;\s*/).find(
-        (c) => c.split('=')[0] === cookieName);
-    const cookieToken = cookieMatch ? decodeURIComponent(cookieMatch.split('=').slice(1).join('=')) : null;
+    const readCookie = (name: string): string | null => {
+      const match = cookieHeader.split(/;\s*/).find(
+          (c) => c.split('=')[0] === name);
+      if (!match) return null;
+      const raw = match.split('=').slice(1).join('=');
+      // A malformed value (e.g. `name=%ZZ`) makes decodeURIComponent throw
+      // URIError. Without this guard a single bad cookie aborts CLIENT_READY,
+      // letting an unauthenticated peer spam server error logs and block
+      // itself from joining (flagged by Qodo on #7755). Treat undecodable
+      // values as absent.
+      try {
+        return decodeURIComponent(raw);
+      } catch (err) {
+        if (err instanceof URIError) return null;
+        throw err;
+      }
+    };
+    const cookieToken = readCookie(`${cookiePrefix}token`);
     const legacyToken = typeof message.token === 'string' ? message.token : null;
     const resolvedToken = cookieToken || legacyToken;
     if (!cookieToken && legacyToken && !thisSession.legacyTokenWarned) {
@@ -398,14 +447,32 @@ exports.handleMessage = async (socket:any, message: ClientVarMessage) => {
           'See docs/superpowers/specs/2026-04-19-gdpr-pr3-anon-identity-design.md');
       thisSession.legacyTokenWarned = true;
     }
+    const cookieSessionID =
+        readCookie(`${cookiePrefix}sessionID`) || readCookie('sessionID');
+    const legacySessionID =
+        typeof message.sessionID === 'string' ? message.sessionID : null;
+    const resolvedSessionID = cookieSessionID || legacySessionID;
+    if (!cookieSessionID && legacySessionID && !thisSession.legacySessionIdWarned) {
+      messageLogger.warn(
+          'client sent sessionID via CLIENT_READY message; integrators should ' +
+          'set the sessionID cookie as HttpOnly (issue #7045). The in-message ' +
+          'field is deprecated and will be removed in a future release.');
+      thisSession.legacySessionIdWarned = true;
+    }
     // Remember this information since we won't have the cookie in further socket.io messages. This
     // information will be used to check if the sessionId of this connection is still valid since it
     // could have been deleted by the API.
     thisSession.auth = {
-      sessionID: message.sessionID,
+      sessionID: resolvedSessionID,
       padID: message.padId,
       token: resolvedToken,
     };
+    // Issue #7659: connections from the in-place history iframe must not
+    // trigger the duplicate-author kick — they share the parent's author
+    // by design, and kicking the parent on iframe load would tear down
+    // the live editor mid-session. The iframe sets `embed=1` in its
+    // socket.io handshake query.
+    thisSession.embed = socket.handshake?.query?.embed === '1';
 
     // Pad does not exist, so we need to sanitize the id
     if (!(await padManager.doesPadExist(thisSession.auth.padID))) {
@@ -573,6 +640,7 @@ exports.handleCustomObjectMessage = (msg: CustomMessage, sessionID: string) => {
     } else {
       // broadcast to all clients on this pad
       socketio.sockets.in(msg.data.payload.padId).emit('message', msg);
+      recordSocketEmit(msg.data.type);
     }
   }
 };
@@ -593,6 +661,7 @@ exports.handleCustomMessage = (padID: string, msgString:string) => {
     },
   };
   socketio.sockets.in(padID).emit('message', msg);
+  recordSocketEmit(msg.data.type);
 };
 
 /**
@@ -633,6 +702,7 @@ exports.sendChatMessageToPadClients = async (mt: ChatMessage|number, puId: strin
     type: 'COLLABROOM',
     data: {type: 'CHAT_MESSAGE', message},
   });
+  recordSocketEmit('CHAT_MESSAGE');
   await promise;
 };
 
@@ -750,8 +820,14 @@ const handleUserChanges = async (socket:any, message: {
   // if the session was valid when the message arrived in the first place
   if (!thisSession) throw new Error('client disconnected');
 
-  // Measure time to process edit
+  // Measure time to process edit. stats.timer('edits') spans the full handler
+  // (apply + fan-out) for backwards-compat; the new Prometheus histogram below
+  // wraps only the apply path so the scaling-dive harness can distinguish
+  // "apply is slow" from "fan-out is slow". Failed applies do not call the
+  // stopper — leaving the timer un-observed keeps the success-path
+  // distribution clean.
   const stopWatch = stats.timer('edits').start();
+  const stopApplyHistogram = recordChangesetApply();
   try {
     const {data: {baseRev, apool, changeset}} = message;
     if (baseRev == null) throw new Error('missing baseRev');
@@ -799,12 +875,49 @@ const handleUserChanges = async (socket:any, message: {
                           `${opAuthorId} in changeset ${changeset}`);
         }
       }
+      // Reject '+' ops that do not carry the author attribute. The standard
+      // JS client always tags inserts with the author; rejecting unattributed
+      // inserts here keeps pad.atext.text and pad.atext.attribs in lock-step.
+      // Without this check, an insert op with empty attribs grows the text
+      // without contributing matching markers to the attribs string, leaving
+      // the stored AText in a state where the two iterables disagree on
+      // length — applyToAText then desyncs and breaks reconciliation in
+      // every client that later loads the pad.
+      if (op.opcode === '+' && !opAuthorId) {
+        throw new Error(`Author ${thisSession.author} submitted an insert without an ` +
+                        `author attribute in changeset ${changeset}`);
+      }
+      // Defense-in-depth: reject any wire-borne `*N` that resolves to the
+      // system author. The session-author equality check above already
+      // catches the case where `*N` claims a different real user as
+      // author, but `Pad.SYSTEM_AUTHOR_ID` is server-internal — it's
+      // only used when `spliceText` / `setText` are called with an empty
+      // authorId from HTTP API or plugin paths. No legitimate
+      // socket.io session ever writes as the system author, so a wire
+      // op that names it is either a confused client or an attempt to
+      // launder writes through a reserved attribution slot. Either way,
+      // refuse.
+      // Hardcoded mirror of `Pad.SYSTEM_AUTHOR_ID` from src/node/db/Pad.ts.
+      // A `const {Pad} = require('../db/Pad')` at module scope returned
+      // a partially-initialized class here (circular load via padManager),
+      // so the static-field access ended up undefined and short-circuited
+      // the check at runtime. Inline literal is the simplest fix.
+      if (opAuthorId === 'a.etherpad-system') {
+        throw new Error(`Author ${thisSession.author} attempted to submit changes as the ` +
+                        `reserved system author ${opAuthorId} in changeset ${changeset}`);
+      }
     }
 
     // ex. adoptChangesetAttribs
 
     // Afaik, it copies the new attributes from the changeset, to the global Attribute Pool
     let rebasedChangeset = moveOpsToNewPool(changeset, wireApool, pad.pool);
+    // Snapshot the post-pool-mapping form so the retransmission check below
+    // can recognise our changeset against the stored revision form. Comparing
+    // the raw client `changeset` against `c` would miss legitimate
+    // retransmissions whenever moveOpsToNewPool renumbered an attribute
+    // (e.g. `*0` -> `*1` because the pad pool already had something at slot 0).
+    const canonicalCs = rebasedChangeset;
 
     // ex. applyUserChanges
     let r = baseRev;
@@ -815,9 +928,9 @@ const handleUserChanges = async (socket:any, message: {
     while (r < pad.getHeadRevisionNumber()) {
       r++;
       const {changeset: c, meta: {author: authorId}} = await pad.getRevision(r);
-      if (changeset === c && thisSession.author === authorId) {
+      if (canonicalCs === c && thisSession.author === authorId) {
         // Assume this is a retransmission of an already applied changeset.
-        rebasedChangeset = identity(unpack(changeset).oldLen);
+        rebasedChangeset = identity(unpack(canonicalCs).oldLen);
       }
       // At this point, both "c" (from the pad) and "changeset" (from the
       // client) are relative to revision r - 1. The follow function
@@ -833,6 +946,22 @@ const handleUserChanges = async (socket:any, message: {
           `Can't apply changeset ${rebasedChangeset} with oldLen ` +
           `${oldLen(rebasedChangeset)} to document of length ${prevText.length}`);
     }
+    // Defensive: reject any rebased changeset whose application would leave
+    // the pad text not ending with '\n'. Previously the server silently
+    // appended a separate `nlChangeset` correction revision; that worked
+    // for the stored pad but the FIRST broadcast (the malformed user
+    // revision) reached browsers BEFORE the correction did, and the
+    // browser's line assembler asserts "line assembler not finished" on
+    // a doc that doesn't end with '\n', taking the session out. Refuse to
+    // accept such changesets — clients must always preserve the
+    // trailing-newline invariant.
+    const projectedText = applyToText(rebasedChangeset, prevText);
+    if (!projectedText.endsWith('\n')) {
+      throw new Error(
+          `Rejected USER_CHANGES whose application would leave the pad ` +
+          `without a trailing '\\n' (length ${projectedText.length}). ` +
+          `Every USER_CHANGES must preserve the "doc ends with \\n" invariant.`);
+    }
 
     const newRev = await pad.appendRevision(rebasedChangeset, thisSession.author);
     // The head revision will either stay the same or increase by 1 depending on whether the
@@ -844,15 +973,13 @@ const handleUserChanges = async (socket:any, message: {
       await pad.appendRevision(correctionChangeset, thisSession.author);
     }
 
-    // Make sure the pad always ends with an empty line.
-    if (pad.text().lastIndexOf('\n') !== pad.text().length - 1) {
-      const nlChangeset = makeSplice(pad.text(), pad.text().length - 1, 0, '\n');
-      await pad.appendRevision(nlChangeset, thisSession.author);
-    }
-
     // The client assumes that ACCEPT_COMMIT and NEW_CHANGES messages arrive in order. Make sure we
     // have already sent any previous ACCEPT_COMMIT and NEW_CHANGES messages.
     assert.equal(thisSession.rev, r);
+    // End of the apply path. The Prometheus histogram observes here so that
+    // fan-out (socket emit + updatePadClients) does NOT inflate the apply
+    // duration. Failed applies are deliberately not recorded.
+    stopApplyHistogram();
     socket.emit('message', {type: 'COLLABROOM', data: {type: 'ACCEPT_COMMIT', newRev}});
     thisSession.rev = newRev;
     if (newRev !== r) thisSession.time = await pad.getRevisionDate(newRev);
@@ -916,6 +1043,7 @@ exports.updatePadClients = async (pad: PadType) => {
       };
       try {
         socket.emit('message', msg);
+        recordSocketEmit('NEW_CHANGES');
       } catch (err:any) {
         messageLogger.error(`Failed to notify user of new revision: ${err.stack || err}`);
         return;
@@ -1039,12 +1167,16 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
   // stable identity across windows and devices, so concurrent same-author
   // sessions are legitimate and must not be kicked.
   const roomSockets = _getRoomSockets(pad.id);
-  if (user == null) {
+  if (user == null && !sessionInfo.embed) {
     for (const otherSocket of roomSockets) {
       // The user shouldn't have joined the room yet, but check anyway just in case.
       if (otherSocket.id === socket.id) continue;
       const sinfo = sessioninfos[otherSocket.id];
-      if (sinfo && sinfo.author === sessionInfo.author) {
+      // Embedded sessions (issue #7659 — in-place history iframe) share
+      // the parent's author by design, so they neither kick same-author
+      // sockets nor get kicked by them. Only non-embedded same-author
+      // duplicates (real stale tabs) hit the kick path.
+      if (sinfo && sinfo.author === sessionInfo.author && !sinfo.embed) {
         // fix user's counter, works on page refresh or if user closes browser window and then rejoins
         sessioninfos[otherSocket.id] = {};
         otherSocket.leave(sessionInfo.padId);
@@ -1174,6 +1306,7 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
       },
       enableDarkMode: settings.enableDarkMode,
       enablePadWideSettings: settings.enablePadWideSettings,
+      enablePluginPadOptions: settings.enablePluginPadOptions,
       padDeletionToken,
       // Allow-listed copy — settings.privacyBanner could carry extra nested
       // keys from a hand-edited settings.json; sending those by reference

@@ -19,7 +19,7 @@ Built artefacts land in `./dist/`.
 
 ## Building locally
 
-Prereqs: Node 24 (current LTS; `engines.node` floor is 20), pnpm 10+, nfpm.
+Prereqs: Node 24 (current LTS; matches `engines.node` floor), pnpm 11.1.2+, nfpm.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -88,12 +88,17 @@ sudo systemctl start etherpad
 curl http://localhost:9001/health
 ```
 
-`apt` will pull in `nodejs (>= 22)` (matches Etherpad's `engines.node`).
-Recommended runtime is the current Node.js LTS (24); on distros without a
-new enough Node, add NodeSource first:
+`apt` will pull in `nodejs (>= 24)` (matches Etherpad's `engines.node`).
+If your distro's repos still ship a pre-Node-24 `nodejs` package, add
+NodeSource's `node_24.x` apt repo before `apt install`:
 
 ```sh
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+KEYRING=/usr/share/keyrings/nodesource.gpg
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+  | sudo gpg --dearmor --yes -o "${KEYRING}"
+echo "deb [signed-by=${KEYRING}] https://deb.nodesource.com/node_24.x nodistro main" \
+  | sudo tee /etc/apt/sources.list.d/nodesource.list
+sudo apt-get update
 ```
 
 ## Configuration

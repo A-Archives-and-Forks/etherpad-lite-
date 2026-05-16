@@ -17,7 +17,8 @@ export type InstalledPlugin = {
   name: string,
   path: string,
   realPath: string,
-  version:string,
+  version: string,
+  description?: string,
   updatable?: boolean
 }
 

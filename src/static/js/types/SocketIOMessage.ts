@@ -190,8 +190,10 @@ export type ClientReadyMessage = {
   type: 'CLIENT_READY',
   component: string,
   padId: string,
-  sessionID: string,
-  token: string,
+  /** @deprecated since #7045 — read server-side from the HttpOnly cookie. */
+  sessionID?: string,
+  /** @deprecated since GDPR PR3 — read server-side from the HttpOnly cookie. */
+  token?: string,
   userInfo: UserInfo,
   padSettingsDefaults?: PadOption,
   reconnect?: boolean
@@ -260,7 +262,12 @@ export type PadOption = {
   "alwaysShowChat"?:   boolean,
   "chatAndUsers"?:     boolean,
   "lang"?:             null|string,
-  view? : MapArrayType<boolean|string>
+  view? : MapArrayType<boolean|string>,
+  // Plugin-namespaced pad-wide options (gated by settings.enablePluginPadOptions).
+  // The runtime regex is /^ep_[a-z0-9_]+$/ — TypeScript template literals
+  // can't constrain that exactly, so this signature accepts any ep_-prefixed
+  // string and applyPadSettings/normalizePadSettings reject the rest.
+  [k: `ep_${string}`]: unknown,
 }
 
 
@@ -324,8 +331,10 @@ export type SocketClientReadyMessage = {
   type: string
   component: string
   padId: string
-  sessionID: string
-  token: string
+  /** @deprecated since #7045 — read server-side from the HttpOnly cookie. */
+  sessionID?: string
+  /** @deprecated since GDPR PR3 — read server-side from the HttpOnly cookie. */
+  token?: string
   userInfo: {
     colorId: string|null
     name: string|null
