@@ -590,25 +590,42 @@ class Pad {
       Object.assign(this, value);
       if ('pool' in value) this.pool = new AttributePool().fromJsonable(value.pool);
     } else {
-      if (text == null) {
+      // Auto-generated default content (settings.defaultPadText or whatever a
+      // padDefaultContent hook substitutes) is not written by the user who
+      // happens to open the pad first, so the text must not carry their author
+      // attribute — otherwise the welcome text shows up in the creator's
+      // authorship colour (issue #7885). Track whether the text came from the
+      // default-content path so its insert op can be attributed to the system
+      // author.
+      const usedDefaultContent = (text == null);
+      if (usedDefaultContent) {
         const context = {pad: this, authorId, type: 'text', content: settings.defaultPadText};
         await hooks.aCallAll('padDefaultContent', context);
         if (context.type !== 'text') throw new Error(`unsupported content type: ${context.type}`);
         text = exports.cleanText(context.content);
       }
-      // When the initial pad text is non-empty but no authorId was
-      // supplied (internal getPad calls during HTTP API setup,
-      // padDefaultContent flows, plugin-driven pad creation), fall back
-      // to the stable system author so the initial changeset's insert
-      // op carries an `author` attribute. Mirrors the same substitution
+      // The author *attribute* applied to the initial text — i.e. what colours
+      // it in the editor — is the stable system author when the content is
+      // auto-generated default text (#7885), or when non-empty text was
+      // supplied without an authorId (internal getPad calls during HTTP API
+      // setup, plugin-driven pad creation). The latter keeps the insert op
+      // carrying an `author` attribute, mirroring the substitution
       // setText/appendText already do via spliceText.
-      const effectiveAuthorId =
-          (text.length > 0 && !authorId) ? Pad.SYSTEM_AUTHOR_ID : authorId;
-      const firstAttribs = effectiveAuthorId
-          ? [['author', effectiveAuthorId] as [string, string]]
+      const attribAuthorId =
+          ((usedDefaultContent || !authorId) && text.length > 0)
+            ? Pad.SYSTEM_AUTHOR_ID : authorId;
+      const firstAttribs = attribAuthorId
+          ? [['author', attribAuthorId] as [string, string]]
           : undefined;
+      // The *revision* author (revs:0 meta.author) stays the real creator so
+      // pad ownership is preserved: isPadCreator() / the pad-wide settings gate
+      // and the deletion token all key off getRevisionAuthor(0). Only when no
+      // author was supplied at all do we fall back to the system author, so the
+      // initial revision still records a stable, non-empty author.
+      const revisionAuthorId =
+          authorId || (text.length > 0 ? Pad.SYSTEM_AUTHOR_ID : '');
       const firstChangeset = makeSplice('\n', 0, 0, text, firstAttribs, this.pool);
-      await this.appendRevision(firstChangeset, effectiveAuthorId);
+      await this.appendRevision(firstChangeset, revisionAuthorId);
     }
     this.padSettings = Pad.normalizePadSettings(this.padSettings);
     await hooks.aCallAll('padLoad', {pad: this});
