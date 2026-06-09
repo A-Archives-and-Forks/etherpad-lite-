@@ -369,7 +369,7 @@ export type SettingsType = {
     from: string | null;
     auth: {user: string; pass: string} | null;
   },
-  getPublicSettings: () => Pick<SettingsType, "title" | "skinVariants"|"randomVersionString"|"skinName"|"toolbar"| "exposeVersion"| "gitVersion" | "enablePadWideSettings" | "enablePluginPadOptions" | "privacyBanner">,
+  getPublicSettings: () => Pick<SettingsType, "title" | "skinVariants"|"randomVersionString"|"skinName"|"toolbar"| "exposeVersion"| "gitVersion" | "enableDarkMode" | "enablePadWideSettings" | "enablePluginPadOptions" | "privacyBanner">,
 }
 
 const settings: SettingsType = {
@@ -434,11 +434,11 @@ const settings: SettingsType = {
   updateServer: "https://static.etherpad.org",
   enableDarkMode: true,
   enablePadWideSettings: true,
-  // New plugin-padOption passthrough is opt-in per AGENTS.MD §52 ("New
-  // features should be placed behind feature flags and disabled by
-  // default"). Flip to true to let plugins (e.g. ep_plugin_helpers'
-  // padToggle) ride the existing padoptions broadcast/persist rail.
-  enablePluginPadOptions: false,
+  // Lets plugins (e.g. ep_plugin_helpers' padToggle / padSelect) ride the
+  // existing padoptions broadcast/persist rail to store pad-wide options
+  // under ep_* keys. Operators who want to lock plugin-driven pad-wide
+  // state out can set this to false in settings.json.
+  enablePluginPadOptions: true,
   allowPadDeletionByAllUsers: false,
   privacyBanner: {
     enabled: false,
@@ -871,6 +871,9 @@ const settings: SettingsType = {
       title: settings.title,
       skinName: settings.skinName,
       skinVariants: settings.skinVariants,
+      // Needed so pad.html / timeslider.html only emit the dark theme-color
+      // variant when dark mode can actually be reached client-side (#7606).
+      enableDarkMode: settings.enableDarkMode,
       enablePadWideSettings: settings.enablePadWideSettings,
       enablePluginPadOptions: settings.enablePluginPadOptions,
       privacyBanner: getPublicPrivacyBanner(),
@@ -1339,6 +1342,41 @@ export const reloadSettings = () => {
       logger.error(`cookie.prefix "${settings.cookie.prefix}" contains invalid characters. ` +
           'Only alphanumeric characters, hyphens, and underscores are allowed. Using empty prefix.');
       settings.cookie.prefix = '';
+    }
+
+    // Warn when an account still uses a placeholder/example password from the
+    // shipped config; these should be changed before the instance is exposed.
+    // Logged loudly (error level in production) rather than throwing, so test
+    // fixtures and existing setups that use placeholder credentials still run.
+    {
+      const weakPasswords = new Set(['changeme1', 'changeme', 'admin', 'password', '']);
+      const users = (settings.users || {}) as Record<string, {password?: string, is_admin?: boolean}>;
+      const offenders = Object.keys(users).filter((name) =>
+        users[name] && typeof users[name].password === 'string' &&
+        weakPasswords.has(users[name].password as string));
+      if (offenders.length) {
+        const msg = `Account(s) using a default/placeholder password: ${offenders.join(', ')}. ` +
+            'Set a strong password (or use the ep_hash_auth plugin) before exposing this instance.';
+        if (process.env.NODE_ENV === 'production') logger.error(msg);
+        else logger.warn(msg);
+      }
+
+      // Same check for OIDC client secrets when SSO is configured: the shipped
+      // templates fall back to placeholder values if ADMIN_SECRET / USER_SECRET
+      // are not provided.
+      const sso = (settings as any).sso;
+      const ssoClients: Array<{client_id?: string, client_secret?: string}> =
+        (sso && Array.isArray(sso.clients)) ? sso.clients : [];
+      const weakSecrets = new Set(['admin', 'user', 'secret', 'changeme', '']);
+      const secretOffenders = ssoClients
+        .filter((c) => c && typeof c.client_secret === 'string' && weakSecrets.has(c.client_secret))
+        .map((c) => c.client_id || '(unnamed client)');
+      if (secretOffenders.length) {
+        const msg = `SSO client(s) using a default/placeholder client_secret: ${secretOffenders.join(', ')}. ` +
+            'Set a strong secret (e.g. via the ADMIN_SECRET / USER_SECRET env vars) before enabling SSO in production.';
+        if (process.env.NODE_ENV === 'production') logger.error(msg);
+        else logger.warn(msg);
+      }
     }
 
     if (settings.dbType === 'dirty') {

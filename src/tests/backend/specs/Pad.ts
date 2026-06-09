@@ -179,6 +179,58 @@ describe(__filename, function () {
       pad = await padManager.getPad(padId);
       assert.equal(pad!.text(), `${want}\n`);
     });
+
+    // Returns the set of author IDs actually applied to the pad's text, by
+    // resolving every attribute marker in the current AText against the pool.
+    // This is what colours the text in the editor — distinct from
+    // getRevisionAuthor()/getAllAuthors() which also reflect pool bookkeeping.
+    const authorsAppliedToText = (p: any): Set<string> => {
+      const applied = new Set<string>();
+      const attribs: string = p.atext.attribs;
+      for (const m of attribs.matchAll(/\*([0-9a-z]+)/g)) {
+        const attr = p.pool.getAttrib(parseInt(m[1], 36));
+        if (attr && attr[0] === 'author' && attr[1] !== '') applied.add(attr[1]);
+      }
+      return applied;
+    };
+
+    it('does not colour default content with the creating user (issue #7885)',
+        async function () {
+      // When a user opens a brand-new pad, CLIENT_READY calls
+      // getPad(padId, null, session.author). The default welcome text is not
+      // written by that user, so its insert op must not carry their author
+      // attribute (which would colour it in the creator's colour). The system
+      // author owns the text instead.
+      const creator = await authorManager.getAuthorId(`t.${padId}`);
+      pad = await padManager.getPad(padId, null, creator);
+      const applied = authorsAppliedToText(pad);
+      assert(!applied.has(creator),
+          `default text must not be coloured with the creating author ${creator}`);
+      assert(applied.has('a.etherpad-system'),
+          'default text should be owned by the system author');
+    });
+
+    it('keeps the creating user as the revision-0 author so pad ownership is preserved',
+        async function () {
+      // isPadCreator()/the pad-wide settings gate and the deletion token all
+      // key off getRevisionAuthor(0). Reassigning the welcome-text colour to
+      // the system author (above) must not strip the creator's ownership.
+      const creator = await authorManager.getAuthorId(`t.${padId}`);
+      pad = await padManager.getPad(padId, null, creator);
+      assert.equal(await (pad as any).getRevisionAuthor(0), creator,
+          'the creating user must remain the revision-0 author');
+    });
+
+    it('still colours explicitly provided content with the creating author',
+        async function () {
+      // A real author providing real text (e.g. API createPad with text)
+      // keeps ownership of that text — only auto-generated default content is
+      // reassigned to the system author.
+      const creator = await authorManager.getAuthorId(`t.${padId}`);
+      pad = await padManager.getPad(padId, 'real user content', creator);
+      assert(authorsAppliedToText(pad).has(creator),
+          'explicitly provided text should be coloured with the creating author');
+    });
   });
 
   describe('normalizePadSettings lang (issue #7586)', function () {
@@ -214,7 +266,7 @@ describe(__filename, function () {
     });
     afterEach(function () { console.warn = warnSpy; });
 
-    describe('with enablePluginPadOptions = true', function () {
+    describe('with enablePluginPadOptions = true (default)', function () {
       before(function () { settings.enablePluginPadOptions = true; });
 
       it('preserves ep_* keys verbatim so plugins can ride padoptions', function () {
@@ -285,10 +337,10 @@ describe(__filename, function () {
       });
     });
 
-    describe('with enablePluginPadOptions = false (default)', function () {
+    describe('with enablePluginPadOptions = false (operator opt-out)', function () {
       before(function () { settings.enablePluginPadOptions = false; });
 
-      it('drops every ep_* key — feature flag is opt-in', function () {
+      it('drops every ep_* key — operator has opted out of plugin pad-wide state', function () {
         const ps: any = Pad.Pad.normalizePadSettings({
           ep_table_of_contents: {enabled: true},
           ep_font_color: 'red',

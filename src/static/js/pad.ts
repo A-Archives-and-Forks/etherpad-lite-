@@ -720,9 +720,26 @@ const pad = {
       pad.refreshPadSettingsControls();
       pad.applyOptionsChange();
       pad.refreshMyViewControls();
+      // The following view overrides MUST run inside postAceInit (after
+      // padeditor.init resolves), not in the synchronous tail of
+      // _afterHandshake. Running them sync queues a setProperty in the
+      // Ace2Editor pending-init queue; the queue is flushed when ace
+      // finishes loading, but padeditor.init's own
+      // setViewOptions(initialViewOptions) call runs immediately *after*
+      // that flush and clobbers the URL-driven value. See #7464 for the
+      // RTL incarnation of this race (now generalised here for #7840).
       if (settings.rtlIsExplicit) {
         // URL or server config explicitly set RTL — takes priority over cookie
         pad.changeViewOption('rtlIsTrue', settings.rtlIsTrue === true);
+      }
+      if (settings.LineNumbersDisabled === true) {
+        pad.changeViewOption('showLineNumbers', false);
+      }
+      if (settings.noColors === true) {
+        pad.changeViewOption('noColors', true);
+      }
+      if (settings.useMonospaceFontGlobal === true) {
+        pad.changeViewOption('padFontFamily', 'RobotoMono');
       }
 
       // Prevent sticky chat or chat and users to be checked for mobiles
@@ -809,24 +826,6 @@ const pad = {
       ace.ace_setEditable(!window.clientVars.readonly);
     });
 
-    // If the LineNumbersDisabled value is set to true then we need to hide the Line Numbers
-    if (settings.LineNumbersDisabled === true) {
-      this.changeViewOption('showLineNumbers', false);
-    }
-
-    // If the noColors value is set to true then we need to
-    // hide the background colors on the ace spans
-    if (settings.noColors === true) {
-      this.changeViewOption('noColors', true);
-    }
-
-    // RTL override is applied in postAceInit (after padeditor.init resolves)
-    // to avoid a race where setViewOptions(initialViewOptions) overwrites it.
-
-    // If the Monospacefont value is set to true then change it to monospace.
-    if (settings.useMonospaceFontGlobal === true) {
-      this.changeViewOption('padFontFamily', 'RobotoMono');
-    }
     // if the globalUserName value is set we need to tell the server and
     // the client about the new authorname
     if (settings.globalUserName !== false) {
@@ -877,6 +876,14 @@ const pad = {
           options,
           changedBy: pad.myUserInfo.name || 'unnamed',
         });
+    // The pad creator is never "enforced upon themselves", so their personal
+    // view overrides (cookies) are always merged on top of the pad-wide value
+    // in getEffectivePadOptions. A stale personal pref would therefore mask the
+    // pad-wide value they just set, making the control appear to do nothing
+    // (#7900). Sync the creator's personal pref to the value they chose so
+    // their own view adopts it immediately. They can still override it
+    // afterwards via the "My view" controls.
+    pad.setMyViewOption(key, value);
   },
   changeViewOption: (key, value) => {
     const effectiveOptions = pad.getEffectivePadOptions();
