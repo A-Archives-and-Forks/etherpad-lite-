@@ -305,8 +305,13 @@ const handlePadDelete = async (socket: any, padDeleteMessage: PadDeleteMessage) 
   // back to the creator-cookie path, otherwise a creator pasting a wrong
   // recovery token into the disclosure field would still succeed — masking a
   // typo and contradicting the UI.
-  const creatorOk = !tokenSupplied && isCreator;
-  const flagOk = !tokenSupplied && !isCreator && settings.allowPadDeletionByAllUsers;
+  // Readonly sessions can never delete via the token-less paths: they cannot
+  // edit the pad, so they must not be able to destroy it just because
+  // allowPadDeletionByAllUsers is on (issue #7959). A valid recovery token
+  // (tokenOk) remains a sufficient credential regardless of session mode.
+  const writable = !session.readonly;
+  const creatorOk = !tokenSupplied && isCreator && writable;
+  const flagOk = !tokenSupplied && !isCreator && settings.allowPadDeletionByAllUsers && writable;
 
   if (creatorOk || tokenOk || flagOk) {
     await retrievedPad.remove();
@@ -1321,6 +1326,16 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
     const hasGetAuthorIdHook = (plugins.hooks.getAuthorId || []).length > 0;
     const hasDurableIdentity = hasGetAuthorIdHook && !!(user && user.username);
     const canDeleteWithoutToken = settings.allowPadDeletionByAllUsers || hasDurableIdentity;
+    // Whether this session may delete the pad with no token at all: the creator
+    // on this device (creator-cookie still present), or any user when the
+    // instance opted everyone in. Drives the plain "Delete pad" button, which is
+    // independent of enablePadWideSettings (issue #7959) — deletion is not a
+    // pad-wide setting and must stay reachable when that section is disabled.
+    // Readonly viewers are excluded: they cannot edit, let alone delete, so
+    // allowPadDeletionByAllUsers must not hand them a delete button (the server
+    // enforces the same in handlePadDelete).
+    const canDeletePad =
+        !sessionInfo.readonly && (isCreator || settings.allowPadDeletionByAllUsers);
     const padDeletionToken =
         isCreator && !canDeleteWithoutToken
         ? await padDeletionManager.createDeletionTokenIfAbsent(sessionInfo.padId)
@@ -1346,6 +1361,7 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
       // redundant, so the client labels the action "Delete Pad" instead of
       // "Delete with token" (issue #7926). See showDeletionTokenModalIfPresent.
       canDeleteWithoutToken,
+      canDeletePad,
       // Allow-listed copy — settings.privacyBanner could carry extra nested
       // keys from a hand-edited settings.json; sending those by reference
       // would leak them to every browser. See getPublicPrivacyBanner().

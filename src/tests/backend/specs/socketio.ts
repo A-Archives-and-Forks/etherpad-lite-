@@ -540,6 +540,9 @@ describe(__filename, function () {
           'creator should get a token so the client can show the save-token modal');
       assert.ok(cv.data.padDeletionToken.length >= 32);
       assert.equal(cv.data.canDeleteWithoutToken, false);
+      // The creator can always delete without a token on this device, so the
+      // plain "Delete pad" button is offered (issue #7959).
+      assert.equal(cv.data.canDeletePad, true);
     });
 
     it('no token (and so no modal) when allowPadDeletionByAllUsers is true', async function () {
@@ -554,7 +557,76 @@ describe(__filename, function () {
       // can already delete the pad without a token in this configuration.
       assert.equal(cv.data.padDeletionToken, null);
       assert.equal(cv.data.canDeleteWithoutToken, true);
+      assert.equal(cv.data.canDeletePad, true);
     });
+
+    it('non-creator gets canDeletePad=false by default, true under allowPadDeletionByAllUsers (#7959)',
+        async function () {
+          const supertest = require('supertest');
+          // The creator (default cookie jar) establishes the pad's rev-0 author.
+          const resCreator = await agent.get('/p/pad').expect(200);
+          socket = await common.connect(resCreator);
+          const cvCreator: any = await common.handshake(socket, 'pad');
+          assert.equal(cvCreator.data.canDeletePad, true, 'creator can always delete');
+
+          // A different browser (separate cookie jar) is NOT the creator, so with
+          // allowPadDeletionByAllUsers off it must not be offered the token-less
+          // Delete pad button.
+          const otherBrowser = supertest(common.baseUrl);
+          const resOther = await otherBrowser.get('/p/pad').expect(200);
+          const otherSocket = await common.connect(resOther);
+          try {
+            const cvOther: any = await common.handshake(otherSocket, 'pad');
+            assert.equal(cvOther.data.canDeletePad, false,
+                'non-creator must not see Delete pad by default');
+          } finally {
+            otherSocket.close();
+          }
+
+          // With everyone opted in, the same non-creator CAN delete, so the
+          // button must be offered — independent of enablePadWideSettings (#7959).
+          // @ts-ignore - public setting toggled per test
+          settings.allowPadDeletionByAllUsers = true;
+          const otherBrowser2 = supertest(common.baseUrl);
+          const resOther2 = await otherBrowser2.get('/p/pad').expect(200);
+          const otherSocket2 = await common.connect(resOther2);
+          try {
+            const cvOther2: any = await common.handshake(otherSocket2, 'pad');
+            assert.equal(cvOther2.data.canDeletePad, true,
+                'allowPadDeletionByAllUsers must offer Delete pad to everyone');
+          } finally {
+            otherSocket2.close();
+          }
+        });
+
+    it('readonly viewer is denied canDeletePad and token-less deletion under allowPadDeletionByAllUsers (#7959)',
+        async function () {
+          // @ts-ignore - public setting toggled per test
+          settings.allowPadDeletionByAllUsers = true;
+          // Creator establishes the pad (rev-0 author) and yields its read-only id.
+          const resCreator = await agent.get('/p/pad').expect(200);
+          const creatorSocket = await common.connect(resCreator);
+          const cvCreator: any = await common.handshake(creatorSocket, 'pad');
+          const readOnlyId = cvCreator.data.readOnlyId;
+          assert.ok(readOnlyManager.isReadOnlyId(readOnlyId));
+          creatorSocket.close();
+
+          // A read-only viewer must NOT be offered the token-less delete button,
+          // even with deletion opened to all users — readonly viewers cannot edit,
+          // let alone delete (issue #7959).
+          const resRo = await agent.get(`/p/${readOnlyId}`).expect(200);
+          socket = await common.connect(resRo);
+          const cvRo: any = await common.handshake(socket, readOnlyId);
+          assert.equal(cvRo.data.readonly, true);
+          assert.equal(cvRo.data.canDeletePad, false,
+              'readonly viewers must not get the token-less Delete pad button');
+
+          // ...and the server must refuse a token-less PAD_DELETE from a readonly
+          // session, or allowPadDeletionByAllUsers becomes a data-loss hole.
+          await common.sendPadDelete(socket, {padId: 'pad'}).catch(() => {});
+          assert.ok(await padManager.doesPadExist('pad'),
+              'readonly session must not be able to delete the pad without a token');
+        });
 
     it('authenticated creator WITHOUT a getAuthorId hook still gets a token', async function () {
       // requireAuthentication alone is NOT durable: the authorID still comes from
@@ -567,6 +639,7 @@ describe(__filename, function () {
       assert.equal(cv.type, 'CLIENT_VARS');
       assert.equal(typeof cv.data.padDeletionToken, 'string');
       assert.equal(cv.data.canDeleteWithoutToken, false);
+      assert.equal(cv.data.canDeletePad, true);
     });
 
     it('authenticated creator WITH a getAuthorId hook gets no token (durable identity)',
@@ -579,6 +652,7 @@ describe(__filename, function () {
           assert.equal(cv.type, 'CLIENT_VARS');
           assert.equal(cv.data.padDeletionToken, null);
           assert.equal(cv.data.canDeleteWithoutToken, true);
+          assert.equal(cv.data.canDeletePad, true);
         });
   });
 
