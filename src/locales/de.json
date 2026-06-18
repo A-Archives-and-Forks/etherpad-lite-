@@ -96,7 +96,7 @@
 	"admin_plugins.disables.warning_title": "Dieses Plugin entfernt absichtlich die aufgeführten Etherpad-Funktionen.",
 	"admin_plugins.error_retrieving": "Fehler beim Abrufen von Plugins",
 	"admin_plugins.install_error": "Installation von {{plugin}} fehlgeschlagen: {{error}}",
-	"admin_plugins.install_error_requires_newer_etherpad": "Installation von {{plugin}} nicht möglich: hierfür ist neuere Version von Etherpad notwendig. Bitte führe ein Upgrade von Etherpad durch und versuche es erneut.",
+	"admin_plugins.install_error_requires_newer_etherpad": "Installation von {{plugin}} nicht möglich: Hierfür ist neuere Version von Etherpad notwendig. Bitte führe ein Upgrade von Etherpad durch und versuche es erneut.",
 	"admin_plugins.installed": "Installierte Plugins",
 	"admin_plugins.installed_fetching": "Rufe installierte Plugins ab...",
 	"admin_plugins.installed_nothing": "Du hast bisher noch keine Plugins installiert.",
