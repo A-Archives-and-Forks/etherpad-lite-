@@ -32,7 +32,7 @@ jobs:
     steps:
       -
         name: Check out latest release
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       -
@@ -55,7 +55,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - name: Install libreoffice
-        uses: awalsh128/cache-apt-pkgs-action@v1.6.0
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
           packages: libreoffice libreoffice-pdfimport
           version: 1.0

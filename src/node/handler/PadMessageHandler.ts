@@ -305,8 +305,13 @@ const handlePadDelete = async (socket: any, padDeleteMessage: PadDeleteMessage) 
   // back to the creator-cookie path, otherwise a creator pasting a wrong
   // recovery token into the disclosure field would still succeed — masking a
   // typo and contradicting the UI.
-  const creatorOk = !tokenSupplied && isCreator;
-  const flagOk = !tokenSupplied && !isCreator && settings.allowPadDeletionByAllUsers;
+  // Readonly sessions can never delete via the token-less paths: they cannot
+  // edit the pad, so they must not be able to destroy it just because
+  // allowPadDeletionByAllUsers is on (issue #7959). A valid recovery token
+  // (tokenOk) remains a sufficient credential regardless of session mode.
+  const writable = !session.readonly;
+  const creatorOk = !tokenSupplied && isCreator && writable;
+  const flagOk = !tokenSupplied && !isCreator && settings.allowPadDeletionByAllUsers && writable;
 
   if (creatorOk || tokenOk || flagOk) {
     await retrievedPad.remove();
@@ -622,7 +627,18 @@ exports.handleMessage = async (socket:any, message: ClientVarMessage) => {
 const handleSaveRevisionMessage = async (socket:any, message: ClientSaveRevisionMessage) => {
   const {padId, author: authorId} = sessioninfos[socket.id];
   const pad = await padManager.getPad(padId, null, authorId);
-  await pad.addSavedRevision(pad.head, authorId);
+  const savedRevision = await pad.addSavedRevision(pad.head, authorId);
+  // Notify every client in the pad room — including any open timeslider —
+  // so saved-revision markers appear live instead of only on the next
+  // timeslider load (#7946). The client's NEW_SAVEDREV handler existed but
+  // was never reached because this broadcast was missing; live editors that
+  // don't handle the type ignore it. Skip the emit for duplicate saves.
+  if (savedRevision) {
+    socketio.sockets.in(padId).emit('message', {
+      type: 'COLLABROOM',
+      data: {type: 'NEW_SAVEDREV', savedRev: savedRevision},
+    });
+  }
 };
 
 /**
@@ -1287,15 +1303,41 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
     // once. Readonly sessions never see it.
     const isCreator =
         !sessionInfo.readonly && sessionInfo.author === await pad.getRevisionAuthor(0);
-    // Skip token issuance — and so the client never shows the "Save your pad
-    // deletion token" modal (issue #7926) — when the token cannot help:
-    //   - requireAuthentication: every creator already has a stable identity, so
-    //     the cookie/identity path is sufficient.
+    // The deletion token is a recovery handle for the one class of creator that
+    // can otherwise lose the ability to delete their pad: a user whose creator
+    // status lives only in a per-browser author-token cookie. It is pointless —
+    // and the "Save your pad deletion token" modal only overwhelms users who
+    // will never need it (issue #7926) — when either of these holds:
+    //
     //   - allowPadDeletionByAllUsers: anyone can delete the pad with no token at
-    //     all (see handlePadDelete's flagOk branch), so a recovery token is noise
-    //     and the modal only overwhelms users who will never need it.
+    //     all (see handlePadDelete's flagOk branch).
+    //   - the creator has a *durable* identity: authenticated (req.session.user
+    //     with a username) AND the deployment maps that identity to a stable
+    //     authorID via a getAuthorId hook. Only then does `isCreator`
+    //     (author === revision-0 author) survive a cookie clear or a different
+    //     device, so the creator path replaces the token on any device.
+    //
+    // Note we deliberately do NOT treat requireAuthentication alone as durable:
+    // without a getAuthorId hook the authorID still comes from the per-browser
+    // token cookie (AuthorManager.getAuthorId -> getAuthor4Token), so an
+    // authenticated user on a second device is NOT the creator and would be
+    // stranded if we also withheld the token. The getAuthorId hook is the
+    // documented way (doc/api/hooks_server-side) to pin authorID to username.
+    const hasGetAuthorIdHook = (plugins.hooks.getAuthorId || []).length > 0;
+    const hasDurableIdentity = hasGetAuthorIdHook && !!(user && user.username);
+    const canDeleteWithoutToken = settings.allowPadDeletionByAllUsers || hasDurableIdentity;
+    // Whether this session may delete the pad with no token at all: the creator
+    // on this device (creator-cookie still present), or any user when the
+    // instance opted everyone in. Drives the plain "Delete pad" button, which is
+    // independent of enablePadWideSettings (issue #7959) — deletion is not a
+    // pad-wide setting and must stay reachable when that section is disabled.
+    // Readonly viewers are excluded: they cannot edit, let alone delete, so
+    // allowPadDeletionByAllUsers must not hand them a delete button (the server
+    // enforces the same in handlePadDelete).
+    const canDeletePad =
+        !sessionInfo.readonly && (isCreator || settings.allowPadDeletionByAllUsers);
     const padDeletionToken =
-        isCreator && !settings.requireAuthentication && !settings.allowPadDeletionByAllUsers
+        isCreator && !canDeleteWithoutToken
         ? await padDeletionManager.createDeletionTokenIfAbsent(sessionInfo.padId)
         : null;
 
@@ -1314,6 +1356,12 @@ const handleClientReady = async (socket:any, message: ClientReadyMessage) => {
       enablePadWideSettings: settings.enablePadWideSettings,
       enablePluginPadOptions: settings.enablePluginPadOptions,
       padDeletionToken,
+      // Drives the deletion-button label/visibility in pad settings: when the
+      // user can already delete without a token the recovery-token disclosure is
+      // redundant, so the client labels the action "Delete Pad" instead of
+      // "Delete with token" (issue #7926). See showDeletionTokenModalIfPresent.
+      canDeleteWithoutToken,
+      canDeletePad,
       // Allow-listed copy — settings.privacyBanner could carry extra nested
       // keys from a hand-edited settings.json; sending those by reference
       // would leak them to every browser. See getPublicPrivacyBanner().
